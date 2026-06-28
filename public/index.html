@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Пинай мяч ⚽ — 3D онлайн</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #0d161f;
+    color: #fff;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    user-select: none;
+    overflow: hidden;
+  }
+  h1 { margin: 12px 0 2px; font-size: 20px; }
+  .bar { color: #9fb3c8; font-size: 13px; margin-bottom: 6px; text-align: center; }
+  .score {
+    display: flex; gap: 16px; align-items: center;
+    font-size: 24px; font-weight: 800; margin-bottom: 6px;
+  }
+  .score .red { color: #ff5a5a; }
+  .score .blue { color: #4ca3ff; }
+  #stage {
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 12px 40px rgba(0,0,0,.55);
+    line-height: 0;
+  }
+  #stage canvas { display: block; touch-action: none; }
+  #overlay {
+    position: fixed; inset: 0; background: rgba(8,13,18,.94);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; z-index: 10;
+  }
+  #overlay h2 { font-size: 28px; }
+  #overlay p { color: #9fb3c8; max-width: 380px; text-align: center; font-size: 14px; }
+  #name {
+    padding: 10px 14px; font-size: 16px; border-radius: 8px; border: 2px solid #2b3b4a;
+    background: #1b2733; color: #fff; width: 240px; text-align: center;
+  }
+  #play {
+    padding: 10px 28px; font-size: 17px; font-weight: 800; border: none;
+    border-radius: 9px; background: #ffd166; color: #14202c; cursor: pointer;
+  }
+  #status { font-size: 13px; color: #ffb4b4; height: 16px; }
+  kbd {
+    background: #2b3b4a; border-radius: 4px; padding: 1px 6px; font-size: 12px;
+    border: 1px solid #3a4d5e;
+  }
+
+  /* Сенсорное управление */
+  #touch {
+    display: none;
+    position: fixed; left: 0; right: 0; bottom: 0;
+    height: 200px; z-index: 5;
+    pointer-events: none;
+    justify-content: space-between; align-items: flex-end;
+    padding: 0 24px 26px;
+  }
+  #stick {
+    pointer-events: auto;
+    width: 140px; height: 140px; border-radius: 50%;
+    background: rgba(255,255,255,.10);
+    border: 2px solid rgba(255,255,255,.25);
+    position: relative; touch-action: none;
+  }
+  #knob {
+    position: absolute; left: 50%; top: 50%;
+    width: 60px; height: 60px; margin: -30px 0 0 -30px;
+    border-radius: 50%;
+    background: rgba(255,209,102,.85);
+    box-shadow: 0 3px 10px rgba(0,0,0,.4);
+    transform: translate(0,0);
+  }
+  #kickBtn {
+    pointer-events: auto;
+    width: 110px; height: 110px; border-radius: 50%;
+    border: none; touch-action: none;
+    background: rgba(255,90,90,.85); color: #fff;
+    font-size: 18px; font-weight: 900; letter-spacing: 1px;
+    box-shadow: 0 4px 14px rgba(0,0,0,.45);
+  }
+  #kickBtn:active { background: rgba(255,90,90,1); transform: scale(.95); }
+</style>
+</head>
+<body>
+  <h1>Пинай мяч ⚽ — 3D онлайн</h1>
+  <div class="bar">
+    Движение — <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> или стрелки &nbsp;·&nbsp; удар — <kbd>Пробел</kbd>
+  </div>
+  <div class="score">
+    <span class="red" id="sRed">0</span><span>:</span><span class="blue" id="sBlue">0</span>
+  </div>
+  <div id="stage"></div>
+
+  <div id="touch">
+    <div id="stick"><div id="knob"></div></div>
+    <button id="kickBtn">УДАР</button>
+  </div>
+
+  <div id="overlay">
+    <h2>⚽ Пинай мяч — 3D</h2>
+    <p>Бегай своей фишкой и толкай объёмный мяч в чужие ворота. Красные играют налево, синие — направо.</p>
+    <input id="name" placeholder="Твоё имя" maxlength="16" />
+    <button id="play">Играть</button>
+    <div id="status"></div>
+  </div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from "three";
+
+const sRed = document.getElementById("sRed");
+const sBlue = document.getElementById("sBlue");
+const overlay = document.getElementById("overlay");
+const statusEl = document.getElementById("status");
+const stage = document.getElementById("stage");
+
+let cfg = { W: 1000, H: 620, WALL: 14, GOAL_H: 220, PR: 18, BR: 13 };
+let state = { ball: { x: 500, y: 310 }, players: [], score: { red: 0, blue: 0 } };
+let myId = null;
+let ws = null;
+
+// ---------- Связь с сервером ----------
+const input = { up: false, down: false, left: false, right: false, kick: false };
+let lastSent = "";
+
+function connect(name) {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}`);
+  statusEl.textContent = "Подключение…";
+  ws.onopen = () => {
+    statusEl.textContent = "";
+    ws.send(JSON.stringify({ type: "join", name }));
+    overlay.style.display = "none";
+    if (isTouch) touchPanel.style.display = "flex";
+  };
+  ws.onclose = () => {
+    statusEl.textContent = "Соединение потеряно. Обнови страницу.";
+    overlay.style.display = "flex";
+  };
+  ws.onerror = () => { statusEl.textContent = "Ошибка соединения."; };
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "config") { cfg = msg; buildField(); resize(); }
+    else if (msg.type === "you") myId = msg.id;
+    else if (msg.type === "state") {
+      state = msg;
+      sRed.textContent = msg.score.red;
+      sBlue.textContent = msg.score.blue;
+    }
+  };
+}
+
+document.getElementById("play").addEventListener("click", () => {
+  const name = document.getElementById("name").value.trim() || "Игрок";
+  connect(name);
+});
+document.getElementById("name").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") document.getElementById("play").click();
+});
+
+const KEYMAP = {
+  KeyW: "up", ArrowUp: "up", KeyS: "down", ArrowDown: "down",
+  KeyA: "left", ArrowLeft: "left", KeyD: "right", ArrowRight: "right", Space: "kick",
+};
+function flushInput() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const packed = JSON.stringify({ type: "input", ...input });
+  if (packed === lastSent) return;
+  lastSent = packed;
+  ws.send(packed);
+}
+function setKey(code, val) {
+  const k = KEYMAP[code];
+  if (!k) return;
+  input[k] = val;
+  flushInput();
+}
+window.addEventListener("keydown", (e) => { if (KEYMAP[e.code]) { e.preventDefault(); setKey(e.code, true); } });
+window.addEventListener("keyup", (e) => { if (KEYMAP[e.code]) { e.preventDefault(); setKey(e.code, false); } });
+
+// ---- Сенсорное управление (телефон/планшет) ----
+const isTouch = matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
+const touchPanel = document.getElementById("touch");
+const stick = document.getElementById("stick");
+const knob = document.getElementById("knob");
+const kickBtn = document.getElementById("kickBtn");
+
+const STICK_DEAD = 16, STICK_MAX = 46;
+let stickId = null, stickCx = 0, stickCy = 0;
+
+function stickUpdate(e) {
+  let dx = e.clientX - stickCx, dy = e.clientY - stickCy;
+  const dist = Math.hypot(dx, dy) || 0.001;
+  const clamped = Math.min(dist, STICK_MAX);
+  knob.style.transform = `translate(${dx / dist * clamped}px, ${dy / dist * clamped}px)`;
+  input.left = dx < -STICK_DEAD; input.right = dx > STICK_DEAD;
+  input.up = dy < -STICK_DEAD; input.down = dy > STICK_DEAD;
+  flushInput();
+}
+stick.addEventListener("pointerdown", (e) => {
+  stickId = e.pointerId;
+  const r = stick.getBoundingClientRect();
+  stickCx = r.left + r.width / 2; stickCy = r.top + r.height / 2;
+  stick.setPointerCapture(e.pointerId);
+  stickUpdate(e); e.preventDefault();
+});
+stick.addEventListener("pointermove", (e) => {
+  if (e.pointerId === stickId) { stickUpdate(e); e.preventDefault(); }
+});
+function stickRelease(e) {
+  if (e.pointerId !== stickId) return;
+  stickId = null;
+  knob.style.transform = "translate(0,0)";
+  input.left = input.right = input.up = input.down = false;
+  flushInput();
+}
+stick.addEventListener("pointerup", stickRelease);
+stick.addEventListener("pointercancel", stickRelease);
+
+kickBtn.addEventListener("pointerdown", (e) => { input.kick = true; flushInput(); e.preventDefault(); });
+kickBtn.addEventListener("pointerup", (e) => { input.kick = false; flushInput(); e.preventDefault(); });
+kickBtn.addEventListener("pointercancel", () => { input.kick = false; flushInput(); });
+
+// ---------- 3D сцена ----------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d161f);
+scene.fog = new THREE.Fog(0x0d161f, 1400, 2600);
+
+const camera = new THREE.PerspectiveCamera(52, 16 / 10, 1, 6000);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+stage.appendChild(renderer.domElement);
+
+// Свет
+scene.add(new THREE.HemisphereLight(0xbfe3ff, 0x35502f, 0.85));
+const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+sun.position.set(-300, 900, 500);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.near = 100;
+sun.shadow.camera.far = 2500;
+sun.shadow.camera.left = -800;
+sun.shadow.camera.right = 800;
+sun.shadow.camera.top = 600;
+sun.shadow.camera.bottom = -600;
+scene.add(sun);
+
+// Координаты поля -> мир: worldX = x - W/2, worldZ = y - H/2, плоскость на y=0
+function fx(x) { return x - cfg.W / 2; }
+function fz(y) { return y - cfg.H / 2; }
+
+// Текстура газона с разметкой
+function pitchTexture() {
+  const W = cfg.W, H = cfg.H, WALL = cfg.WALL, GOAL_H = cfg.GOAL_H;
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const g = c.getContext("2d");
+  // Полосы газона
+  const stripe = 64;
+  for (let i = 0; i * stripe < W; i++) {
+    g.fillStyle = i % 2 ? "#2f9450" : "#2a8748";
+    g.fillRect(i * stripe, 0, stripe, H);
+  }
+  g.strokeStyle = "rgba(255,255,255,.75)";
+  g.lineWidth = 5;
+  g.strokeRect(WALL, WALL, W - WALL * 2, H - WALL * 2);
+  g.beginPath(); g.moveTo(W / 2, WALL); g.lineTo(W / 2, H - WALL); g.stroke();
+  g.beginPath(); g.arc(W / 2, H / 2, 80, 0, Math.PI * 2); g.stroke();
+  g.fillStyle = "rgba(255,255,255,.85)";
+  g.beginPath(); g.arc(W / 2, H / 2, 8, 0, Math.PI * 2); g.fill();
+  // Вратарские зоны у ворот
+  const gt = (H - GOAL_H) / 2, area = 120;
+  g.strokeRect(WALL, gt - 30, area, GOAL_H + 60);
+  g.strokeRect(W - WALL - area, gt - 30, area, GOAL_H + 60);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
+  return tex;
+}
+
+// Текстура мяча (бело-чёрная)
+function ballTexture() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 128;
+  const g = c.getContext("2d");
+  g.fillStyle = "#ffffff"; g.fillRect(0, 0, 128, 128);
+  g.fillStyle = "#1a1a1a";
+  const spots = [[64, 30], [28, 70], [100, 70], [50, 105], [95, 110], [10, 20]];
+  for (const [x, y] of spots) {
+    g.beginPath(); g.arc(x, y, 13, 0, Math.PI * 2); g.fill();
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+let fieldGroup = null, ballMesh = null;
+const prevBall = { x: 0, z: 0, init: false };
+
+function buildField() {
+  if (fieldGroup) scene.remove(fieldGroup);
+  fieldGroup = new THREE.Group();
+  const { W, H, WALL, GOAL_H, BR } = cfg;
+
+  // Газон
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(W, H),
+    new THREE.MeshStandardMaterial({ map: pitchTexture(), roughness: 0.95 })
+  );
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = 0.6;
+  ground.receiveShadow = true;
+  fieldGroup.add(ground);
+
+  // Подложка-«земля» под полем (рамка)
+  const base = new THREE.Mesh(
+    new THREE.BoxGeometry(W + 80, 40, H + 80),
+    new THREE.MeshStandardMaterial({ color: 0x16221c, roughness: 1 })
+  );
+  base.position.y = -24;
+  base.receiveShadow = true;
+  fieldGroup.add(base);
+
+  // Борта (с проёмами под ворота слева/справа)
+  const wallH = 34;
+  const wallMat = new THREE.MeshStandardMaterial({ color: 0xeef2f5, roughness: 0.6 });
+  function wall(cx, cz, sx, sz) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(sx, wallH, sz), wallMat);
+    m.position.set(cx, wallH / 2, cz);
+    m.castShadow = true; m.receiveShadow = true;
+    fieldGroup.add(m);
+  }
+  // Верх и низ — на всю ширину
+  wall(0, fz(0) - WALL / 2, W, WALL);
+  wall(0, fz(H) + WALL / 2, W, WALL);
+  // Левый и правый — два сегмента, проём в центре (ворота)
+  const seg = (H - GOAL_H) / 2;
+  wall(fx(0) - WALL / 2, fz(seg / 2), WALL, seg);
+  wall(fx(0) - WALL / 2, fz(H - seg / 2), WALL, seg);
+  wall(fx(W) + WALL / 2, fz(seg / 2), WALL, seg);
+  wall(fx(W) + WALL / 2, fz(H - seg / 2), WALL, seg);
+
+  // Ворота-рамки (штанги)
+  function goalPosts(side, color) {
+    const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.4, metalness: 0.1 });
+    const gt = (H - GOAL_H) / 2, gb = gt + GOAL_H;
+    const x = side === "left" ? fx(0) - WALL : fx(W) + WALL;
+    const postH = 60;
+    for (const zy of [gt, gb]) {
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(5, 5, postH, 12), mat);
+      post.position.set(x, postH / 2, fz(zy));
+      post.castShadow = true;
+      fieldGroup.add(post);
+    }
+    const bar = new THREE.Mesh(new THREE.CylinderGeometry(5, 5, GOAL_H, 12), mat);
+    bar.rotation.x = Math.PI / 2;
+    bar.position.set(x, postH, fz((gt + gb) / 2));
+    bar.castShadow = true;
+    fieldGroup.add(bar);
+  }
+  goalPosts("left", 0xff5a5a);
+  goalPosts("right", 0x4ca3ff);
+
+  scene.add(fieldGroup);
+
+  // Мяч
+  if (!ballMesh) {
+    ballMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(BR, 24, 24),
+      new THREE.MeshStandardMaterial({ map: ballTexture(), roughness: 0.45 })
+    );
+    ballMesh.castShadow = true;
+    scene.add(ballMesh);
+  } else {
+    ballMesh.geometry.dispose();
+    ballMesh.geometry = new THREE.SphereGeometry(BR, 24, 24);
+  }
+  ballMesh.position.set(0, BR, 0);
+  prevBall.init = false;
+
+  // Камера смотрит на центр поля сверху-сбоку
+  camera.position.set(0, H * 1.15, H * 1.15);
+  camera.lookAt(0, 0, 0);
+}
+
+// ---------- Игроки ----------
+const playerMeshes = new Map(); // id -> {group, mesh, label, color, name}
+
+function makeLabel(text) {
+  const c = document.createElement("canvas");
+  c.width = 256; c.height = 64;
+  const g = c.getContext("2d");
+  g.font = "bold 34px system-ui";
+  g.textAlign = "center"; g.textBaseline = "middle";
+  g.lineWidth = 6; g.strokeStyle = "rgba(0,0,0,.7)";
+  g.strokeText(text, 128, 34);
+  g.fillStyle = "#fff";
+  g.fillText(text, 128, 34);
+  const tex = new THREE.CanvasTexture(c);
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
+  spr.scale.set(120, 30, 1);
+  return spr;
+}
+
+function makePlayer(p) {
+  const group = new THREE.Group();
+  const h = cfg.PR * 2.2;
+  const mesh = new THREE.Mesh(
+    new THREE.CylinderGeometry(cfg.PR, cfg.PR * 1.05, h, 24),
+    new THREE.MeshStandardMaterial({ color: p.c, roughness: 0.5 })
+  );
+  mesh.position.y = h / 2;
+  mesh.castShadow = true;
+  group.add(mesh);
+
+  // Кольцо под своим игроком
+  if (p.id === myId) {
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(cfg.PR + 4, cfg.PR + 10, 28),
+      new THREE.MeshBasicMaterial({ color: 0xffd166, side: THREE.DoubleSide })
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 1;
+    group.add(ring);
+  }
+
+  const label = makeLabel(p.n);
+  label.position.y = h + 26;
+  group.add(label);
+
+  scene.add(group);
+  return { group, mesh, label, color: p.c, name: p.n };
+}
+
+function syncPlayers() {
+  const seen = new Set();
+  for (const p of state.players) {
+    seen.add(p.id);
+    let pm = playerMeshes.get(p.id);
+    if (!pm) { pm = makePlayer(p); playerMeshes.set(p.id, pm); }
+    pm.group.position.x = fx(p.x);
+    pm.group.position.z = fz(p.y);
+  }
+  for (const [id, pm] of playerMeshes) {
+    if (!seen.has(id)) { scene.remove(pm.group); playerMeshes.delete(id); }
+  }
+}
+
+// ---------- Размер ----------
+function resize() {
+  const maxW = Math.min(window.innerWidth * 0.96, 1040);
+  const aspect = 16 / 10;
+  const w = maxW, hh = Math.round(maxW / aspect);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(w, hh);
+  camera.aspect = aspect;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener("resize", resize);
+
+// ---------- Цикл рендера ----------
+buildField();
+resize();
+
+function animate() {
+  requestAnimationFrame(animate);
+  if (ballMesh) {
+    const bx = fx(state.ball.x), bz = fz(state.ball.y);
+    // Качение мяча по направлению движения
+    if (prevBall.init) {
+      const dx = bx - prevBall.x, dz = bz - prevBall.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > 0.01) {
+        const axis = new THREE.Vector3(dz, 0, -dx).normalize();
+        ballMesh.rotateOnWorldAxis(axis, dist / cfg.BR);
+      }
+    }
+    ballMesh.position.set(bx, cfg.BR + (state.ball.z || 0), bz);
+    prevBall.x = bx; prevBall.z = bz; prevBall.init = true;
+  }
+  syncPlayers();
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>

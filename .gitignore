@@ -1,0 +1,14 @@
+# Зависимости
+node_modules/
+
+# Логи
+*.log
+npm-debug.log*
+
+# Системное
+.DS_Store
+Thumbs.db
+
+# Локальные настройки редактора/харнесса
+.claude/settings.local.json
+.claude/launch.json

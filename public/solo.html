@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Пинай мяч ⚽</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #1a2a3a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    color: #fff;
+    user-select: none;
+  }
+  h1 { margin: 16px 0 4px; font-size: 24px; }
+  .hint { color: #9fb3c8; font-size: 14px; margin-bottom: 10px; }
+  .scoreboard {
+    display: flex;
+    gap: 24px;
+    margin-bottom: 10px;
+    font-size: 18px;
+    font-weight: 600;
+  }
+  .scoreboard span { color: #ffd166; }
+  canvas {
+    background: linear-gradient(#3aa655 0%, #2e8b48 100%);
+    border-radius: 12px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.4);
+    touch-action: none;
+    cursor: crosshair;
+  }
+  button {
+    margin-top: 12px;
+    padding: 8px 18px;
+    font-size: 15px;
+    border: none;
+    border-radius: 8px;
+    background: #ffd166;
+    color: #1a2a3a;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  button:hover { background: #ffdd7f; }
+</style>
+</head>
+<body>
+  <h1>Пинай мяч ⚽</h1>
+  <div class="hint">Зажми мышку на мяче, оттяни назад и отпусти — чем дальше тянешь, тем сильнее удар. Забивай в ворота!</div>
+  <div class="scoreboard">
+    <div>Голы: <span id="goals">0</span></div>
+    <div>Удары: <span id="shots">0</span></div>
+  </div>
+  <canvas id="game" width="800" height="500"></canvas>
+  <button id="reset">Сбросить мяч</button>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const goalsEl = document.getElementById('goals');
+const shotsEl = document.getElementById('shots');
+
+let goals = 0, shots = 0;
+
+// Ворота: по центру верхней кромки
+const goal = { x: W/2 - 90, y: 0, w: 180, h: 14 };
+
+const ball = {
+  x: W/2,
+  y: H - 80,
+  r: 16,
+  vx: 0,
+  vy: 0,
+  moving: false,
+};
+
+const FRICTION = 0.985;   // замедление
+const MAX_POWER = 22;     // ограничение силы удара
+const STOP_SPEED = 0.25;  // ниже этой скорости мяч останавливается
+
+let aiming = false;
+let aimStart = null;   // точка, где зажали
+let aimNow = null;     // текущая позиция мыши
+
+function resetBall() {
+  ball.x = W/2;
+  ball.y = H - 80;
+  ball.vx = 0;
+  ball.vy = 0;
+  ball.moving = false;
+  aiming = false;
+}
+
+function pointerPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return {
+    x: (t.clientX - rect.left) * (W / rect.width),
+    y: (t.clientY - rect.top) * (H / rect.height),
+  };
+}
+
+function onDown(e) {
+  if (ball.moving) return;
+  const p = pointerPos(e);
+  const d = Math.hypot(p.x - ball.x, p.y - ball.y);
+  if (d <= ball.r + 14) {
+    aiming = true;
+    aimStart = { x: ball.x, y: ball.y };
+    aimNow = p;
+  }
+  e.preventDefault();
+}
+
+function onMove(e) {
+  if (!aiming) return;
+  aimNow = pointerPos(e);
+  e.preventDefault();
+}
+
+function onUp(e) {
+  if (!aiming) return;
+  aiming = false;
+  // Вектор удара = от текущей точки к мячу (тянешь назад — летит вперёд)
+  let dx = aimStart.x - aimNow.x;
+  let dy = aimStart.y - aimNow.y;
+  const power = Math.min(Math.hypot(dx, dy) / 8, MAX_POWER);
+  const len = Math.hypot(dx, dy) || 1;
+  ball.vx = (dx / len) * power;
+  ball.vy = (dy / len) * power;
+  if (power > 0.5) {
+    ball.moving = true;
+    shots++;
+    shotsEl.textContent = shots;
+  }
+  e.preventDefault();
+}
+
+canvas.addEventListener('mousedown', onDown);
+window.addEventListener('mousemove', onMove);
+window.addEventListener('mouseup', onUp);
+canvas.addEventListener('touchstart', onDown, { passive: false });
+canvas.addEventListener('touchmove', onMove, { passive: false });
+canvas.addEventListener('touchend', onUp, { passive: false });
+
+document.getElementById('reset').addEventListener('click', resetBall);
+
+let flash = 0; // вспышка при голе
+
+function update() {
+  if (ball.moving) {
+    ball.x += ball.vx;
+    ball.y += ball.vy;
+    ball.vx *= FRICTION;
+    ball.vy *= FRICTION;
+
+    // Отскоки от стен
+    if (ball.x - ball.r < 0) { ball.x = ball.r; ball.vx *= -0.7; }
+    if (ball.x + ball.r > W) { ball.x = W - ball.r; ball.vx *= -0.7; }
+    if (ball.y + ball.r > H) { ball.y = H - ball.r; ball.vy *= -0.7; }
+
+    // Верхняя кромка: гол или отскок
+    if (ball.y - ball.r < goal.h) {
+      const inGoal = ball.x > goal.x && ball.x < goal.x + goal.w;
+      if (inGoal) {
+        goals++;
+        goalsEl.textContent = goals;
+        flash = 20;
+        resetBall();
+      } else if (ball.y - ball.r < 0) {
+        ball.y = ball.r;
+        ball.vy *= -0.7;
+      }
+    }
+
+    // Остановка
+    if (Math.hypot(ball.vx, ball.vy) < STOP_SPEED) {
+      ball.vx = 0; ball.vy = 0; ball.moving = false;
+    }
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  // Разметка поля
+  ctx.strokeStyle = 'rgba(255,255,255,.35)';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(10, 10, W - 20, H - 20);
+  ctx.beginPath();
+  ctx.arc(W/2, H/2, 60, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Ворота
+  ctx.fillStyle = flash > 0 ? '#ffd166' : '#ffffff';
+  ctx.fillRect(goal.x, goal.y, goal.w, goal.h);
+  // Сетка ворот
+  ctx.strokeStyle = 'rgba(255,255,255,.5)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= goal.w; i += 12) {
+    ctx.beginPath();
+    ctx.moveTo(goal.x + i, 0);
+    ctx.lineTo(goal.x + i, goal.h + 18);
+    ctx.stroke();
+  }
+
+  // Линия прицела
+  if (aiming && aimNow) {
+    const dx = aimStart.x - aimNow.x;
+    const dy = aimStart.y - aimNow.y;
+    const power = Math.min(Math.hypot(dx, dy) / 8, MAX_POWER);
+    ctx.strokeStyle = `rgba(255,209,102,${0.4 + power / MAX_POWER * 0.6})`;
+    ctx.lineWidth = 4;
+    ctx.setLineDash([8, 6]);
+    ctx.beginPath();
+    ctx.moveTo(ball.x, ball.y);
+    ctx.lineTo(ball.x + dx, ball.y + dy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Тень мяча
+  ctx.fillStyle = 'rgba(0,0,0,.2)';
+  ctx.beginPath();
+  ctx.ellipse(ball.x, ball.y + ball.r * 0.9, ball.r * 0.9, ball.r * 0.4, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Мяч
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  // Пятна на мяче
+  ctx.fillStyle = '#222';
+  ctx.beginPath();
+  ctx.arc(ball.x, ball.y, ball.r * 0.32, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (flash > 0) {
+    ctx.fillStyle = `rgba(255,209,102,${flash / 40})`;
+    ctx.fillRect(0, 0, W, H);
+    flash--;
+    if (flash === 19) {
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 48px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText('ГОЛ!', W/2, H/2);
+    }
+  }
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
