@@ -1,0 +1,11 @@
+# Blueprint для деплоя на Render (https://render.com).
+# Создаёт бесплатный веб-сервис с поддержкой WebSocket.
+# Render сам подставит переменную PORT — сервер её читает (см. server.js).
+services:
+  - type: web
+    name: kick-ball-3d
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
