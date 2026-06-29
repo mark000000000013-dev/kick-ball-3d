@@ -185,9 +185,22 @@ function step() {
     if (d < PR + BR) {
       const overlap = PR + BR - d;
       ball.x += nx * overlap; ball.y += ny * overlap;
-      const playerSpeed = Math.hypot(p.vx, p.vy);
-      ball.vx += nx * (playerSpeed * 0.6 + 2.2);
-      ball.vy += ny * (playerSpeed * 0.6 + 2.2);
+      const psp = Math.hypot(p.vx, p.vy);
+      const into = p.vx * nx + p.vy * ny; // >0 — игрок движется в сторону мяча
+      if (p.input.kick) {
+        // При ударе — обычный толчок (плюс сильный удар в блоке ниже)
+        ball.vx += nx * (psp * 0.6 + 2.2);
+        ball.vy += ny * (psp * 0.6 + 2.2);
+      } else if (into > 0.3 && psp > 0.5) {
+        // Ведение: мяч катится со скоростью игрока, держась чуть впереди ног
+        const carry = psp + 1.2;
+        ball.vx = nx * carry;
+        ball.vy = ny * carry;
+      } else {
+        // Мягкий отскок, чтобы мяч не прилипал к стоящему игроку
+        ball.vx += nx * 1.6;
+        ball.vy += ny * 1.6;
+      }
     }
     // Удар по кнопке — толчок вперёд и подброс вверх
     if (p.input.kick && d < PR + BR + KICK_REACH) {
