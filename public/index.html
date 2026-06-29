@@ -351,18 +351,10 @@ function pitchTexture() {
   return tex;
 }
 
-function ballTexture() {
-  const c = document.createElement("canvas");
-  c.width = c.height = 128;
-  const g = c.getContext("2d");
-  g.fillStyle = "#ffffff"; g.fillRect(0, 0, 128, 128);
-  g.fillStyle = "#1a1a1a";
-  const spots = [[64, 30], [28, 70], [100, 70], [50, 105], [95, 110], [10, 20]];
-  for (const [x, y] of spots) { g.beginPath(); g.arc(x, y, 13, 0, Math.PI * 2); g.fill(); }
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
-}
+// Текстура мяча (CC0 equirectangular-развёртка футбольного мяча 2:1)
+const ballTex = new THREE.TextureLoader().load("textures/ball.png");
+ballTex.colorSpace = THREE.SRGBColorSpace;
+ballTex.anisotropy = 8;
 
 let fieldGroup = null, ballMesh = null;
 const prevBall = { x: 0, z: 0, init: false };
@@ -430,7 +422,7 @@ function buildField() {
   if (!ballMesh) {
     ballMesh = new THREE.Mesh(
       new THREE.SphereGeometry(BR, 24, 24),
-      new THREE.MeshStandardMaterial({ map: ballTexture(), roughness: 0.45 })
+      new THREE.MeshStandardMaterial({ map: ballTex, roughness: 0.45 })
     );
     ballMesh.castShadow = true;
     scene.add(ballMesh);
