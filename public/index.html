@@ -114,10 +114,17 @@
   </div>
 
 <script type="importmap">
-{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
 </script>
 <script type="module">
 import * as THREE from "three";
+import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
+import { clone as skeletonClone } from "three/addons/utils/SkeletonUtils.js";
 
 const sRed = document.getElementById("sRed");
 const sBlue = document.getElementById("sBlue");
@@ -129,6 +136,7 @@ let cfg = { W: 1000, H: 620, WALL: 14, GOAL_H: 220, PR: 18, BR: 13 };
 let state = { ball: { x: 500, y: 310, z: 0 }, players: [], score: { red: 0, blue: 0 } };
 let myId = null;
 let ws = null;
+let stateSeq = 0; // растёт при каждом обновлении состояния от сервера
 
 // ---------- Ввод ----------
 const pressed = new Set();          // нажатые клавиши движения
@@ -160,6 +168,7 @@ function connect(name) {
     else if (msg.type === "you") myId = msg.id;
     else if (msg.type === "state") {
       state = msg;
+      stateSeq++;
       sRed.textContent = msg.score.red;
       sBlue.textContent = msg.score.blue;
     }
@@ -242,6 +251,49 @@ sun.shadow.camera.right = 900;
 sun.shadow.camera.top = 700;
 sun.shadow.camera.bottom = -700;
 scene.add(sun);
+
+// ---------- Загрузка 3D-модели персонажа (Mixamo FBX) ----------
+const clock = new THREE.Clock();
+let charTemplate = null;          // загруженная модель — шаблон для клонирования
+let idleClip = null, runClip = null;
+let charScale = 0.18, modelTurn = 0; // поворот модели, чтобы лицо смотрело по ходу движения
+
+// Убираем смещение корня (Hips.position) — бег «на месте», позицией рулит сервер
+function inPlace(clip) {
+  if (clip) clip.tracks = clip.tracks.filter((t) => !t.name.endsWith(".position"));
+  return clip;
+}
+
+const fbxLoader = new FBXLoader();
+fbxLoader.load("models/idle.fbx", (obj) => {
+  const box = new THREE.Box3().setFromObject(obj);
+  const size = new THREE.Vector3(); box.getSize(size);
+  charScale = (cfg.PR * 3.4) / (size.y || 200);
+  idleClip = inPlace(obj.animations && obj.animations[0] ? obj.animations[0] : null);
+  obj.traverse((c) => { if (c.isMesh) { c.castShadow = true; c.frustumCulled = false; } });
+  charTemplate = obj;
+  // Пересоздать уже существующих игроков с моделью
+  for (const [, pm] of playerMeshes) scene.remove(pm.group);
+  playerMeshes.clear();
+}, undefined, (err) => {
+  console.warn("Модель не загрузилась, оставляю кубических человечков", err);
+});
+
+// Анимация бега — отдельным файлом, тот же скелет Mixamo
+fbxLoader.load("models/run.fbx", (obj) => {
+  runClip = inPlace(obj.animations && obj.animations[0] ? obj.animations[0] : null);
+  if (!runClip) return;
+  // Добавить действие бега уже существующим персонажам
+  for (const [, pm] of playerMeshes) {
+    if (pm.char && pm.char.mixer && !pm.char.runAction) {
+      pm.char.runAction = pm.char.mixer.clipAction(runClip);
+      pm.char.runAction.play();
+      pm.char.runAction.setEffectiveWeight(0);
+    }
+  }
+}, undefined, (err) => {
+  console.warn("Анимация бега не загрузилась", err);
+});
 
 // Орбита камеры мышью/пальцем по полю
 let dragId = null, dragX = 0, dragY = 0;
@@ -399,35 +451,53 @@ function makeLabel(text) {
   return spr;
 }
 
-function makePlayer(p) {
-  const group = new THREE.Group();
+// Кубический человечек — запасной вариант, если модель не загрузилась
+function buildBlocky(group, p) {
   const R = cfg.PR;
   const jersey = new THREE.MeshStandardMaterial({ color: p.c, roughness: 0.55 });
   const skin = new THREE.MeshStandardMaterial({ color: 0xffd9a8, roughness: 0.7 });
   const dark = new THREE.MeshStandardMaterial({ color: 0x222831, roughness: 0.8 });
-
-  // Ноги
   const legGeo = new THREE.BoxGeometry(R * 0.5, R * 0.9, R * 0.5);
   const legL = new THREE.Mesh(legGeo, dark); legL.position.set(-R * 0.3, R * 0.45, 0);
   const legR = new THREE.Mesh(legGeo, dark); legR.position.set(R * 0.3, R * 0.45, 0);
-  // Торс (майка)
   const torso = new THREE.Mesh(new THREE.BoxGeometry(R * 1.2, R * 1.1, R * 0.7), jersey);
   torso.position.y = R * 1.45;
-  // Руки
   const armGeo = new THREE.BoxGeometry(R * 0.32, R * 1.0, R * 0.32);
   const armL = new THREE.Mesh(armGeo, skin); armL.position.set(-R * 0.78, R * 1.45, 0);
   const armR = new THREE.Mesh(armGeo, skin); armR.position.set(R * 0.78, R * 1.45, 0);
-  // Голова
   const head = new THREE.Mesh(new THREE.SphereGeometry(R * 0.55, 18, 18), skin);
   head.position.y = R * 2.35;
-  // «Козырёк» спереди (+Z) — видно, куда смотрит
   const visor = new THREE.Mesh(new THREE.BoxGeometry(R * 0.6, R * 0.18, R * 0.25), dark);
   visor.position.set(0, R * 2.4, R * 0.5);
+  for (const m of [legL, legR, torso, armL, armR, head, visor]) { m.castShadow = true; group.add(m); }
+}
 
-  for (const m of [legL, legR, torso, armL, armR, head, visor]) {
-    m.castShadow = true;
-    group.add(m);
-  }
+// Клон Mixamo-модели со своим скелетом, тонировкой и анимациями
+function makeCharacter(p) {
+  const root = skeletonClone(charTemplate);
+  root.scale.setScalar(charScale);
+  root.rotation.y = modelTurn;
+  root.traverse((c) => {
+    if (c.isMesh) {
+      c.material = Array.isArray(c.material) ? c.material.map((m) => m.clone()) : c.material.clone();
+      const mats = Array.isArray(c.material) ? c.material : [c.material];
+      for (const m of mats) if (m.color) m.color.lerp(new THREE.Color(p.c), 0.4);
+      c.castShadow = true;
+    }
+  });
+  const mixer = new THREE.AnimationMixer(root);
+  let idleAction = null, runAction = null;
+  if (idleClip) { idleAction = mixer.clipAction(idleClip); idleAction.play(); }
+  if (runClip) { runAction = mixer.clipAction(runClip); runAction.play(); runAction.setEffectiveWeight(0); }
+  return { root, mixer, idleAction, runAction };
+}
+
+function makePlayer(p) {
+  const group = new THREE.Group();
+  const R = cfg.PR;
+  let char = null;
+  if (charTemplate) { char = makeCharacter(p); group.add(char.root); }
+  else buildBlocky(group, p);
 
   if (p.id === myId) {
     const ring = new THREE.Mesh(
@@ -440,11 +510,11 @@ function makePlayer(p) {
   }
 
   const label = makeLabel(p.n);
-  label.position.y = R * 3.1;
+  label.position.y = (charTemplate ? R * 3.7 : R * 3.1);
   group.add(label);
 
   scene.add(group);
-  return { group, label };
+  return { group, label, char, prevX: p.x, prevY: p.y, seq: -1 };
 }
 
 function syncPlayers() {
@@ -460,6 +530,18 @@ function syncPlayers() {
     let cur = pm.group.rotation.y;
     let diff = ((target - cur + Math.PI) % (Math.PI * 2)) - Math.PI;
     pm.group.rotation.y = cur + diff * 0.25;
+
+    // Бег/стой: оцениваем скорость по перемещению за серверный тик
+    if (pm.char && pm.seq !== stateSeq) {
+      const sp = Math.hypot(p.x - pm.prevX, p.y - pm.prevY);
+      pm.prevX = p.x; pm.prevY = p.y; pm.seq = stateSeq;
+      if (pm.char.runAction && pm.char.idleAction) {
+        const runW = sp > 0.6 ? 1 : 0;
+        const ra = pm.char.runAction, ia = pm.char.idleAction;
+        ra.setEffectiveWeight(ra.getEffectiveWeight() + (runW - ra.getEffectiveWeight()) * 0.25);
+        ia.setEffectiveWeight(ia.getEffectiveWeight() + ((1 - runW) - ia.getEffectiveWeight()) * 0.25);
+      }
+    }
   }
   for (const [id, pm] of playerMeshes) {
     if (!seen.has(id)) { scene.remove(pm.group); playerMeshes.delete(id); }
@@ -531,6 +613,9 @@ function animate(now) {
   now = now || 0;
 
   computeAndSend(now);
+
+  const dt = clock.getDelta();
+  for (const [, pm] of playerMeshes) if (pm.char) pm.char.mixer.update(dt);
 
   // Мяч
   if (ballMesh) {
