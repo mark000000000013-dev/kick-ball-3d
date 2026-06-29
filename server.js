@@ -97,6 +97,7 @@ function addPlayer(name) {
     color: pool[id % pool.length],
     team,
     x: s.x, y: s.y, vx: 0, vy: 0, heading: team === "red" ? 0 : Math.PI,
+    prevKick: false, kickLock: 0,
     input: { mx: 0, my: 0, kick: false },
   };
   players.set(id, p);
@@ -117,11 +118,20 @@ function circleHitsWall(x, y, r) {
 function step() {
   // --- Игроки ---
   for (const p of players.values()) {
-    // Вектор движения от клиента (камеро-зависимый), уже в координатах поля
-    p.vx += p.input.mx * PLAYER_ACCEL;
-    p.vy += p.input.my * PLAYER_ACCEL;
-    p.vx *= PLAYER_FRICTION;
-    p.vy *= PLAYER_FRICTION;
+    // Замах: по фронту нажатия удара ненадолго «вкапываемся» (стоп для пинка)
+    if (p.input.kick && !p.prevKick) p.kickLock = 26; // ~0.43 с
+    p.prevKick = p.input.kick;
+
+    if (p.kickLock > 0) {
+      p.kickLock--;
+      p.vx *= 0.5; p.vy *= 0.5; // не разгоняемся, быстро тормозим
+    } else {
+      // Вектор движения от клиента (камеро-зависимый), уже в координатах поля
+      p.vx += p.input.mx * PLAYER_ACCEL;
+      p.vy += p.input.my * PLAYER_ACCEL;
+      p.vx *= PLAYER_FRICTION;
+      p.vy *= PLAYER_FRICTION;
+    }
     const sp = Math.hypot(p.vx, p.vy);
     if (sp > PLAYER_MAX) { p.vx = p.vx / sp * PLAYER_MAX; p.vy = p.vy / sp * PLAYER_MAX; }
     // Поворот персонажа в сторону движения (когда реально движется)
