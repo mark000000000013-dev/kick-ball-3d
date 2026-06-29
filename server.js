@@ -57,6 +57,8 @@ const GRAVITY = 0.45;          // притяжение к земле за тик
 const BOUNCE = 0.6;            // упругость отскока от газона
 const REACH_HEIGHT = PR * 1.5; // выше этого мяч перелетает игроков
 const BAR_HEIGHT = 60;         // высота перекладины — выше гол не считается
+const STEAL_RANGE = PR * 2 + 6; // на этой дистанции чужой игрок отбирает мяч
+const STEAL_COOLDOWN = 28;      // тиков «неприкосновенности» после смены владельца
 const COLORS_RED = ["#ff5a5a", "#ff8a4c", "#ffd166", "#e84393"];
 const COLORS_BLUE = ["#4ca3ff", "#5ad1c8", "#a06bff", "#74b9ff"];
 
@@ -64,6 +66,8 @@ const goalTop = (H - GOAL_H) / 2;
 const goalBottom = goalTop + GOAL_H;
 
 const ball = { x: W / 2, y: H / 2, z: 0, vx: 0, vy: 0, vz: 0 };
+let ballOwner = null;   // id игрока, ведущего мяч (или null)
+let stealCooldown = 0;  // тики до возможной следующей смены владельца
 const players = new Map(); // id -> {id, name, color, team, x, y, vx, vy, input}
 const score = { red: 0, blue: 0 };
 let nextId = 1;
@@ -77,6 +81,7 @@ function spawnFor(team) {
 function resetPositions() {
   ball.x = W / 2; ball.y = H / 2; ball.z = 0;
   ball.vx = 0; ball.vy = 0; ball.vz = 0;
+  ballOwner = null; stealCooldown = 0;
   for (const p of players.values()) {
     const s = spawnFor(p.team);
     p.x = s.x; p.y = s.y; p.vx = 0; p.vy = 0;
@@ -176,38 +181,50 @@ function step() {
   ball.x += ball.vx;
   ball.y += ball.vy;
 
-  // Столкновение мяча с игроками — только если мяч не выше игрока
-  for (const p of players.values()) {
-    if (ball.z > REACH_HEIGHT) continue; // высокий мяч перелетает
-    const dx = ball.x - p.x, dy = ball.y - p.y;
-    const d = Math.hypot(dx, dy) || 0.01;
-    const nx = dx / d, ny = dy / d;
-    if (d < PR + BR) {
-      const overlap = PR + BR - d;
-      ball.x += nx * overlap; ball.y += ny * overlap;
-      const psp = Math.hypot(p.vx, p.vy);
-      const into = p.vx * nx + p.vy * ny; // >0 — игрок движется в сторону мяча
-      if (p.input.kick) {
-        // При ударе — обычный толчок (плюс сильный удар в блоке ниже)
-        ball.vx += nx * (psp * 0.6 + 2.2);
-        ball.vy += ny * (psp * 0.6 + 2.2);
-      } else if (into > 0.3 && psp > 0.5) {
-        // Ведение: мяч катится со скоростью игрока, держась чуть впереди ног
-        const carry = psp + 1.2;
-        ball.vx = nx * carry;
-        ball.vy = ny * carry;
-      } else {
-        // Мягкий отскок, чтобы мяч не прилипал к стоящему игроку
-        ball.vx += nx * 1.6;
-        ball.vy += ny * 1.6;
-      }
+  // --- Владение мячом: ведение, отбор, удар ---
+  if (stealCooldown > 0) stealCooldown--;
+  let owner = ballOwner ? players.get(ballOwner) : null;
+  if (owner && ball.z > REACH_HEIGHT) { ballOwner = null; owner = null; } // высокий мяч срывается
+
+  // Отбор: чужой игрок подошёл к мячу ближе порога — мяч переходит к нему
+  if (owner && stealCooldown === 0) {
+    let best = null, bestD = STEAL_RANGE;
+    for (const p of players.values()) {
+      if (p.id === owner.id) continue;
+      const dd = Math.hypot(ball.x - p.x, ball.y - p.y);
+      if (dd < bestD) { bestD = dd; best = p; }
     }
-    // Удар по кнопке — толчок вперёд и подброс вверх
-    if (p.input.kick && d < PR + BR + KICK_REACH) {
-      ball.vx += nx * KICK_POWER;
-      ball.vy += ny * KICK_POWER;
-      ball.vz += KICK_LIFT;
+    if (best) { ballOwner = best.id; owner = best; stealCooldown = STEAL_COOLDOWN; }
+  }
+
+  // Подбор свободного мяча тем, кто к нему прикоснулся
+  if (!owner && stealCooldown === 0 && ball.z < REACH_HEIGHT) {
+    let best = null, bestD = PR + BR + 8;
+    for (const p of players.values()) {
+      const dd = Math.hypot(ball.x - p.x, ball.y - p.y);
+      if (dd < bestD) { bestD = dd; best = p; }
     }
+    if (best) { ballOwner = best.id; owner = best; stealCooldown = STEAL_COOLDOWN; }
+  }
+
+  // Удар: владелец бьёт — мяч улетает вперёд, владение сбрасывается
+  if (owner && owner.input.kick) {
+    const fwdx = Math.sin(owner.heading), fwdy = Math.cos(owner.heading);
+    ball.vx = fwdx * KICK_POWER * 1.5;
+    ball.vy = fwdy * KICK_POWER * 1.5;
+    ball.vz = KICK_LIFT;
+    ballOwner = null; owner = null;
+    stealCooldown = STEAL_COOLDOWN;
+  }
+
+  // Приклеиваем мяч к владельцу — чуть впереди по направлению взгляда
+  if (owner) {
+    const fwdx = Math.sin(owner.heading), fwdy = Math.cos(owner.heading);
+    const dist = PR + BR + 2;
+    ball.x = owner.x + fwdx * dist;
+    ball.y = owner.y + fwdy * dist;
+    ball.z = 0; ball.vz = 0;
+    ball.vx = owner.vx; ball.vy = owner.vy;
   }
 
   // Гол засчитывается, только если мяч ниже перекладины и в створе
