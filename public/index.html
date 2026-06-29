@@ -31,14 +31,15 @@
     box-shadow: 0 12px 40px rgba(0,0,0,.55);
     line-height: 0;
   }
-  #stage canvas { display: block; touch-action: none; }
+  #stage canvas { display: block; touch-action: none; cursor: grab; }
+  #stage canvas:active { cursor: grabbing; }
   #overlay {
     position: fixed; inset: 0; background: rgba(8,13,18,.94);
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 14px; z-index: 10;
   }
   #overlay h2 { font-size: 28px; }
-  #overlay p { color: #9fb3c8; max-width: 380px; text-align: center; font-size: 14px; }
+  #overlay p { color: #9fb3c8; max-width: 400px; text-align: center; font-size: 14px; }
   #name {
     padding: 10px 14px; font-size: 16px; border-radius: 8px; border: 2px solid #2b3b4a;
     background: #1b2733; color: #fff; width: 240px; text-align: center;
@@ -91,7 +92,7 @@
 <body>
   <h1>Пинай мяч ⚽ — 3D онлайн</h1>
   <div class="bar">
-    Движение — <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> или стрелки &nbsp;·&nbsp; удар — <kbd>Пробел</kbd>
+    Бег — <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> &nbsp;·&nbsp; удар — <kbd>Пробел</kbd> &nbsp;·&nbsp; камера — тяни мышкой по полю
   </div>
   <div class="score">
     <span class="red" id="sRed">0</span><span>:</span><span class="blue" id="sBlue">0</span>
@@ -105,7 +106,8 @@
 
   <div id="overlay">
     <h2>⚽ Пинай мяч — 3D</h2>
-    <p>Бегай своей фишкой и толкай объёмный мяч в чужие ворота. Красные играют налево, синие — направо.</p>
+    <p>Управляй своим 3D-персонажем от третьего лица. Беги к мячу и толкай его в чужие ворота.
+       Камера — тяни мышкой (или пальцем по полю). Движение — относительно камеры.</p>
     <input id="name" placeholder="Твоё имя" maxlength="16" />
     <button id="play">Играть</button>
     <div id="status"></div>
@@ -124,14 +126,19 @@ const statusEl = document.getElementById("status");
 const stage = document.getElementById("stage");
 
 let cfg = { W: 1000, H: 620, WALL: 14, GOAL_H: 220, PR: 18, BR: 13 };
-let state = { ball: { x: 500, y: 310 }, players: [], score: { red: 0, blue: 0 } };
+let state = { ball: { x: 500, y: 310, z: 0 }, players: [], score: { red: 0, blue: 0 } };
 let myId = null;
 let ws = null;
 
-// ---------- Связь с сервером ----------
-const input = { up: false, down: false, left: false, right: false, kick: false };
-let lastSent = "";
+// ---------- Ввод ----------
+const pressed = new Set();          // нажатые клавиши движения
+let kickHeld = false;
+const stickVec = { x: 0, y: 0, active: false };
+let camYaw = 0;                     // орбита камеры вокруг игрока
+let camPitch = 0.62;               // наклон камеры
+let lastSent = "", lastSendT = 0;
 
+// ---------- Связь с сервером ----------
 function connect(name) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}`);
@@ -167,106 +174,99 @@ document.getElementById("name").addEventListener("keydown", (e) => {
   if (e.key === "Enter") document.getElementById("play").click();
 });
 
-const KEYMAP = {
-  KeyW: "up", ArrowUp: "up", KeyS: "down", ArrowDown: "down",
-  KeyA: "left", ArrowLeft: "left", KeyD: "right", ArrowRight: "right", Space: "kick",
-};
-function flushInput() {
+// Клавиатура
+const MOVE_KEYS = { KeyW: 1, KeyS: 1, KeyA: 1, KeyD: 1, ArrowUp: 1, ArrowDown: 1, ArrowLeft: 1, ArrowRight: 1 };
+window.addEventListener("keydown", (e) => {
+  if (e.code === "Space") { kickHeld = true; e.preventDefault(); return; }
+  if (MOVE_KEYS[e.code]) { pressed.add(e.code); e.preventDefault(); }
+});
+window.addEventListener("keyup", (e) => {
+  if (e.code === "Space") { kickHeld = false; e.preventDefault(); return; }
+  if (MOVE_KEYS[e.code]) { pressed.delete(e.code); e.preventDefault(); }
+});
+
+// Вычисление вектора движения относительно камеры и отправка на сервер
+function computeAndSend(now) {
+  // Локальный вектор: x — вправо, z — назад (к камере)
+  let lx = 0, lz = 0;
+  if (stickVec.active) { lx = stickVec.x; lz = stickVec.y; }
+  else {
+    if (pressed.has("KeyD") || pressed.has("ArrowRight")) lx += 1;
+    if (pressed.has("KeyA") || pressed.has("ArrowLeft")) lx -= 1;
+    if (pressed.has("KeyS") || pressed.has("ArrowDown")) lz += 1;
+    if (pressed.has("KeyW") || pressed.has("ArrowUp")) lz -= 1;
+  }
+  // Базисы камеры на плоскости поля
+  const fx = -Math.sin(camYaw), fz = -Math.cos(camYaw); // «вперёд» (от камеры)
+  const rx = Math.cos(camYaw), rz = -Math.sin(camYaw);  // «вправо»
+  const fAmt = -lz; // вперёд = -z
+  let mx = rx * lx + fx * fAmt;
+  let my = rz * lx + fz * fAmt;
+  const len = Math.hypot(mx, my);
+  if (len > 1) { mx /= len; my /= len; }
+
+  const packed = JSON.stringify({
+    type: "input",
+    mx: Math.round(mx * 100) / 100,
+    my: Math.round(my * 100) / 100,
+    kick: kickHeld,
+  });
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const packed = JSON.stringify({ type: "input", ...input });
   if (packed === lastSent) return;
-  lastSent = packed;
+  lastSent = packed; lastSendT = now;
   ws.send(packed);
 }
-function setKey(code, val) {
-  const k = KEYMAP[code];
-  if (!k) return;
-  input[k] = val;
-  flushInput();
-}
-window.addEventListener("keydown", (e) => { if (KEYMAP[e.code]) { e.preventDefault(); setKey(e.code, true); } });
-window.addEventListener("keyup", (e) => { if (KEYMAP[e.code]) { e.preventDefault(); setKey(e.code, false); } });
-
-// ---- Сенсорное управление (телефон/планшет) ----
-const isTouch = matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
-const touchPanel = document.getElementById("touch");
-const stick = document.getElementById("stick");
-const knob = document.getElementById("knob");
-const kickBtn = document.getElementById("kickBtn");
-
-const STICK_DEAD = 16, STICK_MAX = 46;
-let stickId = null, stickCx = 0, stickCy = 0;
-
-function stickUpdate(e) {
-  let dx = e.clientX - stickCx, dy = e.clientY - stickCy;
-  const dist = Math.hypot(dx, dy) || 0.001;
-  const clamped = Math.min(dist, STICK_MAX);
-  knob.style.transform = `translate(${dx / dist * clamped}px, ${dy / dist * clamped}px)`;
-  input.left = dx < -STICK_DEAD; input.right = dx > STICK_DEAD;
-  input.up = dy < -STICK_DEAD; input.down = dy > STICK_DEAD;
-  flushInput();
-}
-stick.addEventListener("pointerdown", (e) => {
-  stickId = e.pointerId;
-  const r = stick.getBoundingClientRect();
-  stickCx = r.left + r.width / 2; stickCy = r.top + r.height / 2;
-  stick.setPointerCapture(e.pointerId);
-  stickUpdate(e); e.preventDefault();
-});
-stick.addEventListener("pointermove", (e) => {
-  if (e.pointerId === stickId) { stickUpdate(e); e.preventDefault(); }
-});
-function stickRelease(e) {
-  if (e.pointerId !== stickId) return;
-  stickId = null;
-  knob.style.transform = "translate(0,0)";
-  input.left = input.right = input.up = input.down = false;
-  flushInput();
-}
-stick.addEventListener("pointerup", stickRelease);
-stick.addEventListener("pointercancel", stickRelease);
-
-kickBtn.addEventListener("pointerdown", (e) => { input.kick = true; flushInput(); e.preventDefault(); });
-kickBtn.addEventListener("pointerup", (e) => { input.kick = false; flushInput(); e.preventDefault(); });
-kickBtn.addEventListener("pointercancel", () => { input.kick = false; flushInput(); });
 
 // ---------- 3D сцена ----------
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0d161f);
-scene.fog = new THREE.Fog(0x0d161f, 1400, 2600);
+scene.fog = new THREE.Fog(0x0d161f, 1600, 3200);
 
-const camera = new THREE.PerspectiveCamera(52, 16 / 10, 1, 6000);
+const camera = new THREE.PerspectiveCamera(55, 16 / 10, 1, 8000);
+camera.position.set(0, 400, 600);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 stage.appendChild(renderer.domElement);
 
-// Свет
-scene.add(new THREE.HemisphereLight(0xbfe3ff, 0x35502f, 0.85));
+scene.add(new THREE.HemisphereLight(0xbfe3ff, 0x35502f, 0.9));
 const sun = new THREE.DirectionalLight(0xffffff, 1.4);
 sun.position.set(-300, 900, 500);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
 sun.shadow.camera.near = 100;
 sun.shadow.camera.far = 2500;
-sun.shadow.camera.left = -800;
-sun.shadow.camera.right = 800;
-sun.shadow.camera.top = 600;
-sun.shadow.camera.bottom = -600;
+sun.shadow.camera.left = -900;
+sun.shadow.camera.right = 900;
+sun.shadow.camera.top = 700;
+sun.shadow.camera.bottom = -700;
 scene.add(sun);
 
-// Координаты поля -> мир: worldX = x - W/2, worldZ = y - H/2, плоскость на y=0
+// Орбита камеры мышью/пальцем по полю
+let dragId = null, dragX = 0, dragY = 0;
+renderer.domElement.addEventListener("pointerdown", (e) => {
+  dragId = e.pointerId; dragX = e.clientX; dragY = e.clientY;
+  renderer.domElement.setPointerCapture(e.pointerId);
+});
+renderer.domElement.addEventListener("pointermove", (e) => {
+  if (e.pointerId !== dragId) return;
+  camYaw -= (e.clientX - dragX) * 0.005;
+  camPitch = Math.max(0.2, Math.min(1.25, camPitch - (e.clientY - dragY) * 0.004));
+  dragX = e.clientX; dragY = e.clientY;
+});
+function endDrag(e) { if (e.pointerId === dragId) dragId = null; }
+renderer.domElement.addEventListener("pointerup", endDrag);
+renderer.domElement.addEventListener("pointercancel", endDrag);
+
 function fx(x) { return x - cfg.W / 2; }
 function fz(y) { return y - cfg.H / 2; }
 
-// Текстура газона с разметкой
 function pitchTexture() {
   const W = cfg.W, H = cfg.H, WALL = cfg.WALL, GOAL_H = cfg.GOAL_H;
   const c = document.createElement("canvas");
   c.width = W; c.height = H;
   const g = c.getContext("2d");
-  // Полосы газона
   const stripe = 64;
   for (let i = 0; i * stripe < W; i++) {
     g.fillStyle = i % 2 ? "#2f9450" : "#2a8748";
@@ -279,7 +279,6 @@ function pitchTexture() {
   g.beginPath(); g.arc(W / 2, H / 2, 80, 0, Math.PI * 2); g.stroke();
   g.fillStyle = "rgba(255,255,255,.85)";
   g.beginPath(); g.arc(W / 2, H / 2, 8, 0, Math.PI * 2); g.fill();
-  // Вратарские зоны у ворот
   const gt = (H - GOAL_H) / 2, area = 120;
   g.strokeRect(WALL, gt - 30, area, GOAL_H + 60);
   g.strokeRect(W - WALL - area, gt - 30, area, GOAL_H + 60);
@@ -289,7 +288,6 @@ function pitchTexture() {
   return tex;
 }
 
-// Текстура мяча (бело-чёрная)
 function ballTexture() {
   const c = document.createElement("canvas");
   c.width = c.height = 128;
@@ -297,9 +295,7 @@ function ballTexture() {
   g.fillStyle = "#ffffff"; g.fillRect(0, 0, 128, 128);
   g.fillStyle = "#1a1a1a";
   const spots = [[64, 30], [28, 70], [100, 70], [50, 105], [95, 110], [10, 20]];
-  for (const [x, y] of spots) {
-    g.beginPath(); g.arc(x, y, 13, 0, Math.PI * 2); g.fill();
-  }
+  for (const [x, y] of spots) { g.beginPath(); g.arc(x, y, 13, 0, Math.PI * 2); g.fill(); }
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
@@ -313,7 +309,6 @@ function buildField() {
   fieldGroup = new THREE.Group();
   const { W, H, WALL, GOAL_H, BR } = cfg;
 
-  // Газон
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(W, H),
     new THREE.MeshStandardMaterial({ map: pitchTexture(), roughness: 0.95 })
@@ -323,7 +318,6 @@ function buildField() {
   ground.receiveShadow = true;
   fieldGroup.add(ground);
 
-  // Подложка-«земля» под полем (рамка)
   const base = new THREE.Mesh(
     new THREE.BoxGeometry(W + 80, 40, H + 80),
     new THREE.MeshStandardMaterial({ color: 0x16221c, roughness: 1 })
@@ -332,7 +326,6 @@ function buildField() {
   base.receiveShadow = true;
   fieldGroup.add(base);
 
-  // Борта (с проёмами под ворота слева/справа)
   const wallH = 34;
   const wallMat = new THREE.MeshStandardMaterial({ color: 0xeef2f5, roughness: 0.6 });
   function wall(cx, cz, sx, sz) {
@@ -341,17 +334,14 @@ function buildField() {
     m.castShadow = true; m.receiveShadow = true;
     fieldGroup.add(m);
   }
-  // Верх и низ — на всю ширину
   wall(0, fz(0) - WALL / 2, W, WALL);
   wall(0, fz(H) + WALL / 2, W, WALL);
-  // Левый и правый — два сегмента, проём в центре (ворота)
   const seg = (H - GOAL_H) / 2;
   wall(fx(0) - WALL / 2, fz(seg / 2), WALL, seg);
   wall(fx(0) - WALL / 2, fz(H - seg / 2), WALL, seg);
   wall(fx(W) + WALL / 2, fz(seg / 2), WALL, seg);
   wall(fx(W) + WALL / 2, fz(H - seg / 2), WALL, seg);
 
-  // Ворота-рамки (штанги)
   function goalPosts(side, color) {
     const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.4, metalness: 0.1 });
     const gt = (H - GOAL_H) / 2, gb = gt + GOAL_H;
@@ -374,7 +364,6 @@ function buildField() {
 
   scene.add(fieldGroup);
 
-  // Мяч
   if (!ballMesh) {
     ballMesh = new THREE.Mesh(
       new THREE.SphereGeometry(BR, 24, 24),
@@ -388,14 +377,10 @@ function buildField() {
   }
   ballMesh.position.set(0, BR, 0);
   prevBall.init = false;
-
-  // Камера смотрит на центр поля сверху-сбоку
-  camera.position.set(0, H * 1.15, H * 1.15);
-  camera.lookAt(0, 0, 0);
 }
 
-// ---------- Игроки ----------
-const playerMeshes = new Map(); // id -> {group, mesh, label, color, name}
+// ---------- 3D-персонажи ----------
+const playerMeshes = new Map(); // id -> {group, label}
 
 function makeLabel(text) {
   const c = document.createElement("canvas");
@@ -408,39 +393,58 @@ function makeLabel(text) {
   g.fillStyle = "#fff";
   g.fillText(text, 128, 34);
   const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
   const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
-  spr.scale.set(120, 30, 1);
+  spr.scale.set(110, 28, 1);
   return spr;
 }
 
 function makePlayer(p) {
   const group = new THREE.Group();
-  const h = cfg.PR * 2.2;
-  const mesh = new THREE.Mesh(
-    new THREE.CylinderGeometry(cfg.PR, cfg.PR * 1.05, h, 24),
-    new THREE.MeshStandardMaterial({ color: p.c, roughness: 0.5 })
-  );
-  mesh.position.y = h / 2;
-  mesh.castShadow = true;
-  group.add(mesh);
+  const R = cfg.PR;
+  const jersey = new THREE.MeshStandardMaterial({ color: p.c, roughness: 0.55 });
+  const skin = new THREE.MeshStandardMaterial({ color: 0xffd9a8, roughness: 0.7 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x222831, roughness: 0.8 });
 
-  // Кольцо под своим игроком
+  // Ноги
+  const legGeo = new THREE.BoxGeometry(R * 0.5, R * 0.9, R * 0.5);
+  const legL = new THREE.Mesh(legGeo, dark); legL.position.set(-R * 0.3, R * 0.45, 0);
+  const legR = new THREE.Mesh(legGeo, dark); legR.position.set(R * 0.3, R * 0.45, 0);
+  // Торс (майка)
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(R * 1.2, R * 1.1, R * 0.7), jersey);
+  torso.position.y = R * 1.45;
+  // Руки
+  const armGeo = new THREE.BoxGeometry(R * 0.32, R * 1.0, R * 0.32);
+  const armL = new THREE.Mesh(armGeo, skin); armL.position.set(-R * 0.78, R * 1.45, 0);
+  const armR = new THREE.Mesh(armGeo, skin); armR.position.set(R * 0.78, R * 1.45, 0);
+  // Голова
+  const head = new THREE.Mesh(new THREE.SphereGeometry(R * 0.55, 18, 18), skin);
+  head.position.y = R * 2.35;
+  // «Козырёк» спереди (+Z) — видно, куда смотрит
+  const visor = new THREE.Mesh(new THREE.BoxGeometry(R * 0.6, R * 0.18, R * 0.25), dark);
+  visor.position.set(0, R * 2.4, R * 0.5);
+
+  for (const m of [legL, legR, torso, armL, armR, head, visor]) {
+    m.castShadow = true;
+    group.add(m);
+  }
+
   if (p.id === myId) {
     const ring = new THREE.Mesh(
-      new THREE.RingGeometry(cfg.PR + 4, cfg.PR + 10, 28),
+      new THREE.RingGeometry(R + 5, R + 12, 28),
       new THREE.MeshBasicMaterial({ color: 0xffd166, side: THREE.DoubleSide })
     );
     ring.rotation.x = -Math.PI / 2;
-    ring.position.y = 1;
+    ring.position.y = 1.2;
     group.add(ring);
   }
 
   const label = makeLabel(p.n);
-  label.position.y = h + 26;
+  label.position.y = R * 3.1;
   group.add(label);
 
   scene.add(group);
-  return { group, mesh, label, color: p.c, name: p.n };
+  return { group, label };
 }
 
 function syncPlayers() {
@@ -451,6 +455,11 @@ function syncPlayers() {
     if (!pm) { pm = makePlayer(p); playerMeshes.set(p.id, pm); }
     pm.group.position.x = fx(p.x);
     pm.group.position.z = fz(p.y);
+    // Плавный поворот к heading (учёт перехода через ±π)
+    let target = p.h || 0;
+    let cur = pm.group.rotation.y;
+    let diff = ((target - cur + Math.PI) % (Math.PI * 2)) - Math.PI;
+    pm.group.rotation.y = cur + diff * 0.25;
   }
   for (const [id, pm] of playerMeshes) {
     if (!seen.has(id)) { scene.remove(pm.group); playerMeshes.delete(id); }
@@ -459,7 +468,7 @@ function syncPlayers() {
 
 // ---------- Размер ----------
 function resize() {
-  const maxW = Math.min(window.innerWidth * 0.96, 1040);
+  const maxW = Math.min(window.innerWidth * 0.96, 1100);
   const aspect = 16 / 10;
   const w = maxW, hh = Math.round(maxW / aspect);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -469,15 +478,63 @@ function resize() {
 }
 window.addEventListener("resize", resize);
 
-// ---------- Цикл рендера ----------
+// ---------- Сенсорное управление ----------
+const isTouch = matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
+const touchPanel = document.getElementById("touch");
+const stick = document.getElementById("stick");
+const knob = document.getElementById("knob");
+const kickBtn = document.getElementById("kickBtn");
+
+const STICK_MAX = 46;
+let stickId = null, stickCx = 0, stickCy = 0;
+function stickUpdate(e) {
+  let dx = e.clientX - stickCx, dy = e.clientY - stickCy;
+  const dist = Math.hypot(dx, dy) || 0.001;
+  const clamped = Math.min(dist, STICK_MAX);
+  knob.style.transform = `translate(${dx / dist * clamped}px, ${dy / dist * clamped}px)`;
+  stickVec.x = Math.max(-1, Math.min(1, dx / STICK_MAX));
+  stickVec.y = Math.max(-1, Math.min(1, dy / STICK_MAX));
+  stickVec.active = true;
+}
+stick.addEventListener("pointerdown", (e) => {
+  stickId = e.pointerId;
+  const r = stick.getBoundingClientRect();
+  stickCx = r.left + r.width / 2; stickCy = r.top + r.height / 2;
+  stick.setPointerCapture(e.pointerId);
+  stickUpdate(e); e.preventDefault();
+});
+stick.addEventListener("pointermove", (e) => {
+  if (e.pointerId === stickId) { stickUpdate(e); e.preventDefault(); }
+});
+function stickRelease(e) {
+  if (e.pointerId !== stickId) return;
+  stickId = null;
+  knob.style.transform = "translate(0,0)";
+  stickVec.x = 0; stickVec.y = 0; stickVec.active = false;
+}
+stick.addEventListener("pointerup", stickRelease);
+stick.addEventListener("pointercancel", stickRelease);
+
+kickBtn.addEventListener("pointerdown", (e) => { kickHeld = true; e.preventDefault(); });
+kickBtn.addEventListener("pointerup", (e) => { kickHeld = false; e.preventDefault(); });
+kickBtn.addEventListener("pointercancel", () => { kickHeld = false; });
+
+// ---------- Цикл ----------
 buildField();
 resize();
 
-function animate() {
+const camTarget = new THREE.Vector3(0, 0, 0);
+const desired = new THREE.Vector3();
+
+function animate(now) {
   requestAnimationFrame(animate);
+  now = now || 0;
+
+  computeAndSend(now);
+
+  // Мяч
   if (ballMesh) {
     const bx = fx(state.ball.x), bz = fz(state.ball.y);
-    // Качение мяча по направлению движения
     if (prevBall.init) {
       const dx = bx - prevBall.x, dz = bz - prevBall.z;
       const dist = Math.hypot(dx, dz);
@@ -489,10 +546,26 @@ function animate() {
     ballMesh.position.set(bx, cfg.BR + (state.ball.z || 0), bz);
     prevBall.x = bx; prevBall.z = bz; prevBall.init = true;
   }
+
   syncPlayers();
+
+  // Камера следует за своим игроком
+  const me = state.players.find((p) => p.id === myId);
+  if (me) { camTarget.set(fx(me.x), 30, fz(me.y)); }
+  else { camTarget.set(0, 30, 0); }
+
+  const DIST = 260;
+  desired.set(
+    camTarget.x + Math.sin(camYaw) * Math.cos(camPitch) * DIST,
+    camTarget.y + Math.sin(camPitch) * DIST,
+    camTarget.z + Math.cos(camYaw) * Math.cos(camPitch) * DIST
+  );
+  camera.position.lerp(desired, 0.12);
+  camera.lookAt(camTarget.x, camTarget.y + 24, camTarget.z);
+
   renderer.render(scene, camera);
 }
-animate();
+requestAnimationFrame(animate);
 </script>
 </body>
 </html>

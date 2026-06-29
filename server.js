@@ -96,23 +96,19 @@ function addPlayer(name) {
     name: (name || "Игрок").slice(0, 16),
     color: pool[id % pool.length],
     team,
-    x: s.x, y: s.y, vx: 0, vy: 0,
-    input: { up: false, down: false, left: false, right: false, kick: false },
+    x: s.x, y: s.y, vx: 0, vy: 0, heading: team === "red" ? 0 : Math.PI,
+    input: { mx: 0, my: 0, kick: false },
   };
   players.set(id, p);
   return p;
 }
 
 function circleHitsWall(x, y, r) {
-  // Возвращает скорректированные координаты после столкновения с бортами,
-  // учитывая проёмы ворот слева и справа.
+  // Сплошные борта по всему периметру — используется для игроков,
+  // чтобы они не выбегали за поле через проём ворот (мяч обрабатывается отдельно).
   let nx = x, ny = y, hit = { x: false, y: false };
-  const inGoalBand = y > goalTop && y < goalBottom;
-  // Левый/правый борт — пропускаем мяч в проёме ворот
-  if (!inGoalBand) {
-    if (nx - r < WALL) { nx = WALL + r; hit.x = true; }
-    if (nx + r > W - WALL) { nx = W - WALL - r; hit.x = true; }
-  }
+  if (nx - r < WALL) { nx = WALL + r; hit.x = true; }
+  if (nx + r > W - WALL) { nx = W - WALL - r; hit.x = true; }
   if (ny - r < WALL) { ny = WALL + r; hit.y = true; }
   if (ny + r > H - WALL) { ny = H - WALL - r; hit.y = true; }
   return { nx, ny, hit };
@@ -121,15 +117,15 @@ function circleHitsWall(x, y, r) {
 function step() {
   // --- Игроки ---
   for (const p of players.values()) {
-    const i = p.input;
-    if (i.left) p.vx -= PLAYER_ACCEL;
-    if (i.right) p.vx += PLAYER_ACCEL;
-    if (i.up) p.vy -= PLAYER_ACCEL;
-    if (i.down) p.vy += PLAYER_ACCEL;
+    // Вектор движения от клиента (камеро-зависимый), уже в координатах поля
+    p.vx += p.input.mx * PLAYER_ACCEL;
+    p.vy += p.input.my * PLAYER_ACCEL;
     p.vx *= PLAYER_FRICTION;
     p.vy *= PLAYER_FRICTION;
     const sp = Math.hypot(p.vx, p.vy);
     if (sp > PLAYER_MAX) { p.vx = p.vx / sp * PLAYER_MAX; p.vy = p.vy / sp * PLAYER_MAX; }
+    // Поворот персонажа в сторону движения (когда реально движется)
+    if (sp > 0.4) p.heading = Math.atan2(p.vx, p.vy);
     p.x += p.vx; p.y += p.vy;
     const c = circleHitsWall(p.x, p.y, PR);
     p.x = c.nx; p.y = c.ny;
@@ -216,6 +212,7 @@ function broadcast() {
     players: [...players.values()].map((p) => ({
       id: p.id, n: p.name, c: p.color, t: p.team,
       x: Math.round(p.x), y: Math.round(p.y),
+      h: Math.round(p.heading * 100) / 100,
     })),
   });
   for (const ws of wss.clients) {
@@ -241,8 +238,11 @@ wss.on("connection", (ws) => {
       ws.send(JSON.stringify({ type: "you", id: player.id, team: player.team }));
     } else if (msg.type === "input" && player) {
       const i = player.input;
-      i.up = !!msg.up; i.down = !!msg.down; i.left = !!msg.left;
-      i.right = !!msg.right; i.kick = !!msg.kick;
+      // Камеро-зависимый вектор движения в координатах поля, длина <= 1
+      let mx = +msg.mx || 0, my = +msg.my || 0;
+      const len = Math.hypot(mx, my);
+      if (len > 1) { mx /= len; my /= len; }
+      i.mx = mx; i.my = my; i.kick = !!msg.kick;
     }
   });
 
