@@ -255,7 +255,7 @@ scene.add(sun);
 // ---------- Загрузка 3D-модели персонажа (Mixamo FBX) ----------
 const clock = new THREE.Clock();
 let charTemplate = null;          // загруженная модель — шаблон для клонирования
-let idleClip = null, runClip = null;
+let idleClip = null, runClip = null, kickClip = null;
 let charScale = 0.18, modelTurn = 0; // поворот модели, чтобы лицо смотрело по ходу движения
 
 // Убираем смещение корня (Hips.position) — бег «на месте», позицией рулит сервер
@@ -293,6 +293,17 @@ fbxLoader.load("models/run.fbx", (obj) => {
   }
 }, undefined, (err) => {
   console.warn("Анимация бега не загрузилась", err);
+});
+
+// Анимация удара (проигрывается один раз при пинке)
+fbxLoader.load("models/kick.fbx", (obj) => {
+  kickClip = inPlace(obj.animations && obj.animations[0] ? obj.animations[0] : null);
+  if (!kickClip) return;
+  for (const [, pm] of playerMeshes) {
+    if (pm.char && pm.char.mixer && !pm.char.kickAction) attachKick(pm.char);
+  }
+}, undefined, (err) => {
+  console.warn("Анимация удара не загрузилась", err);
 });
 
 // Орбита камеры мышью/пальцем по полю
@@ -486,10 +497,29 @@ function makeCharacter(p) {
     }
   });
   const mixer = new THREE.AnimationMixer(root);
-  let idleAction = null, runAction = null;
-  if (idleClip) { idleAction = mixer.clipAction(idleClip); idleAction.play(); }
-  if (runClip) { runAction = mixer.clipAction(runClip); runAction.play(); runAction.setEffectiveWeight(0); }
-  return { root, mixer, idleAction, runAction };
+  const char = { root, mixer, idleAction: null, runAction: null, kickAction: null, kicking: false };
+  if (idleClip) { char.idleAction = mixer.clipAction(idleClip); char.idleAction.play(); }
+  if (runClip) { char.runAction = mixer.clipAction(runClip); char.runAction.play(); char.runAction.setEffectiveWeight(0); }
+  if (kickClip) attachKick(char);
+  mixer.addEventListener("finished", (e) => {
+    if (e.action === char.kickAction) char.kicking = false;
+  });
+  return char;
+}
+
+// Анимация удара — разовая (не зацикленная)
+function attachKick(char) {
+  char.kickAction = char.mixer.clipAction(kickClip);
+  char.kickAction.setLoop(THREE.LoopOnce, 1);
+  char.kickAction.clampWhenFinished = false;
+}
+
+function triggerKick(char) {
+  if (!char.kickAction) return;
+  char.kicking = true;
+  char.kickAction.reset();
+  char.kickAction.setEffectiveWeight(1);
+  char.kickAction.play();
 }
 
 function makePlayer(p) {
@@ -514,7 +544,7 @@ function makePlayer(p) {
   group.add(label);
 
   scene.add(group);
-  return { group, label, char, prevX: p.x, prevY: p.y, seq: -1 };
+  return { group, label, char, prevX: p.x, prevY: p.y, seq: -1, prevK: 0, moving: false };
 }
 
 function syncPlayers() {
@@ -531,16 +561,24 @@ function syncPlayers() {
     let diff = ((target - cur + Math.PI) % (Math.PI * 2)) - Math.PI;
     pm.group.rotation.y = cur + diff * 0.25;
 
-    // Бег/стой: оцениваем скорость по перемещению за серверный тик
-    if (pm.char && pm.seq !== stateSeq) {
-      const sp = Math.hypot(p.x - pm.prevX, p.y - pm.prevY);
-      pm.prevX = p.x; pm.prevY = p.y; pm.seq = stateSeq;
-      if (pm.char.runAction && pm.char.idleAction) {
-        const runW = sp > 0.6 ? 1 : 0;
-        const ra = pm.char.runAction, ia = pm.char.idleAction;
-        ra.setEffectiveWeight(ra.getEffectiveWeight() + (runW - ra.getEffectiveWeight()) * 0.25);
-        ia.setEffectiveWeight(ia.getEffectiveWeight() + ((1 - runW) - ia.getEffectiveWeight()) * 0.25);
+    // Анимации: стой / бег / удар
+    if (pm.char) {
+      const c = pm.char;
+      if (pm.seq !== stateSeq) {
+        const sp = Math.hypot(p.x - pm.prevX, p.y - pm.prevY);
+        pm.prevX = p.x; pm.prevY = p.y; pm.seq = stateSeq;
+        pm.moving = sp > 0.6;
+        const kNow = p.k || 0;
+        if (kNow && !pm.prevK) triggerKick(c); // фронт нажатия удара
+        pm.prevK = kNow;
       }
+      const kickW = c.kicking ? 1 : 0;
+      const runW = (!c.kicking && pm.moving) ? 1 : 0;
+      const idleW = (!c.kicking && !pm.moving) ? 1 : 0;
+      const blend = (act, tw) => { if (act) act.setEffectiveWeight(act.getEffectiveWeight() + (tw - act.getEffectiveWeight()) * 0.3); };
+      blend(c.kickAction, kickW);
+      blend(c.runAction, runW);
+      blend(c.idleAction, idleW);
     }
   }
   for (const [id, pm] of playerMeshes) {

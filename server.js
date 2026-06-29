@@ -213,6 +213,7 @@ function broadcast() {
       id: p.id, n: p.name, c: p.color, t: p.team,
       x: Math.round(p.x), y: Math.round(p.y),
       h: Math.round(p.heading * 100) / 100,
+      k: p.input.kick ? 1 : 0,
     })),
   });
   for (const ws of wss.clients) {
